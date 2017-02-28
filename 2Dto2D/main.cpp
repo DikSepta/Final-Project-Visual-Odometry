@@ -16,7 +16,7 @@ using namespace std;
 using namespace cv;
 using namespace cv::xfeatures2d;
 
-#define MAX_FRAME 1500
+#define MAX_FRAME 15
 #define CLOCK_PER_SEC 1000
 #define STAR_MAXSIZE 30
 #define STAR_RESPONSE_TH 20
@@ -393,6 +393,8 @@ double estimateScale(Mat P_1,Mat P_2,Mat P_3, vector<Point2f> matched_1, vector<
 
 int main()
 {
+    vector<Point3d> point3d;
+    Mat point4d;
     hconcat(R_w, t_w, proj_mat_1);
     /*Inisialisasi Mode*/
     img1 = captureImage(0);
@@ -400,7 +402,7 @@ int main()
     /*extract feature and compute descriptors*/
     star->detect(img1,keypoint_1);
     surf->compute(img1, keypoint_1, descriptor_1);
-
+    int last_frame;
     for(int frame = 1; frame < MAX_FRAME; frame++)
     {
         cout << "Frame " << frame << endl;
@@ -464,14 +466,13 @@ int main()
         proj_mat_2 = createProjMat(R, t);
 
         /*triangulate points*/
-        vector<Point3d> point3d;
-        Mat point4d;
+        point3d.clear();
         TriangulatePoints(point1, point2, K.inv(), proj_mat_1, proj_mat_2, point3d);
         //triangulatePoints(proj_mat_1, proj_mat_2, point1, point2, point4d);
         for(int i = 0; i < point1.size(); i++)
         {
-            //cout << point4d.at<double>(0,i)/point4d.at<double>(3,i) << "," << point4d.at<double>(1,i)/point4d.at<double>(3,i) << "," << point4d.at<double>(2,i)/point4d.at<double>(3,i) << " coba :" ;
-            cout << point3d.at(i).x << "," << point3d.at(i).y << "," << point3d.at(i).z << endl ;
+            //cout <<  "X: " << point4d.at<double>(0,i)/point4d.at<double>(3,i) << " Y: " << point4d.at<double>(1,i)/point4d.at<double>(3,i) << " Z: " << point4d.at<double>(2,i)/point4d.at<double>(3,i) << endl;//" coba :" ;
+            //cout << "X: "<<point3d.at(i).x << " Y: " << point3d.at(i).y << " Z: " << point3d.at(i).z << endl ;
         }
 
         Mat R_vec;
@@ -512,7 +513,22 @@ int main()
         prev_good_matches = good_matches;
 
         waitKey(1);
+        last_frame = frame;
     }
+    char filename[255];
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-1);
+    Mat img_tes_1 = imread(filename, IMREAD_COLOR);
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame);
+    Mat img_tes_2 = imread(filename, IMREAD_COLOR);
+
+    circle(img_tes_1, Point(point1.at(54).x, point1.at(54).y), 1, CV_RGB(255,0,0), 2);
+    circle(img_tes_2, Point(point2.at(54).x, point2.at(54).y), 1, CV_RGB(255,0,0), 2);
+    imshow("frame_1",img_tes_1);
+    imshow("frame_2",img_tes_2);
+    cout << "3D point : ";
+    cout << "X: "<<point3d.at(54).x << " Y: " << point3d.at(54).y << " Z: " << point3d.at(54).z << endl ;
+
     imwrite("/media/dikysepta/DATA/Final Project/trajectory.png", traj);
+    waitKey(0);
     return 0;
 }
