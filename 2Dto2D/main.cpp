@@ -16,7 +16,7 @@ using namespace std;
 using namespace cv;
 using namespace cv::xfeatures2d;
 
-#define MAX_FRAME 15
+#define MAX_FRAME 150
 #define CLOCK_PER_SEC 1000
 #define STAR_MAXSIZE 30
 #define STAR_RESPONSE_TH 20
@@ -48,13 +48,14 @@ double fontScale = 1;
 int thickness = 1;
 cv::Point textOrg(10, 50);
 Mat traj = Mat::zeros(600, 600, CV_8UC3);
+Mat proj_mat_0 = Mat::zeros(3,4, CV_32FC1);
 Mat proj_mat_1 = (Mat_<double>(3,4) << 718.856, 0, 607.1928, 0, 0, 718.856, 185.2157, 0, 0, 0, 1, 0);
 Mat proj_mat_2 = Mat::zeros(3,4, CV_32FC1);
-Mat proj_mat_3 = Mat::zeros(3,4, CV_32FC1);
 
 vector<KeyPoint> keypoint_1, keypoint_2, keypoint_0;
 Mat descriptor_1, descriptor_2, descriptor_3;
 vector<Point2f> point1, point2, match_1, match_2, match_3;
+vector<Point3d> point3d;
 vector<DMatch> prev_good_matches;
 
 vector<Point3d> pnp_3d_point;
@@ -151,11 +152,11 @@ vector<DMatch> matchFeature(Mat descriptor_1, Mat descriptor_2)
 
     clock_t timing = clock();
     BFMatcher matcher(NORM_L2);
-//    cout << "matching init :" << (clock()-timing)/CLOCK_PER_SEC << endl;
-//    timing = clock();
+    cout << "matching init :" << (clock()-timing)/CLOCK_PER_SEC << endl;
+    timing = clock();
     matcher.match(descriptor_2, descriptor_1, matches); //paling lama
 
-//    cout << "matching match :" << (clock()-timing)/CLOCK_PER_SEC << endl;
+    cout << "matching match :" << (clock()-timing)/CLOCK_PER_SEC << endl;
 //    timing = clock();
     double max_dist = 0; double min_dist = 10000;
     //-- Quick calculation of max and min distances between keypoints
@@ -393,15 +394,14 @@ double estimateScale(Mat P_1,Mat P_2,Mat P_3, vector<Point2f> matched_1, vector<
 
 int main()
 {
-    vector<Point3d> point3d;
-    Mat point4d;
-    hconcat(R_w, t_w, proj_mat_1);
     /*Inisialisasi Mode*/
     img1 = captureImage(0);
 
     /*extract feature and compute descriptors*/
     star->detect(img1,keypoint_1);
     surf->compute(img1, keypoint_1, descriptor_1);
+
+    hconcat(R_w, t_w, proj_mat_1);
     int last_frame;
     for(int frame = 1; frame < MAX_FRAME; frame++)
     {
@@ -463,7 +463,7 @@ int main()
             R_c = R_w.t();
             t_c = -R_c*t_w;
         }
-        proj_mat_2 = createProjMat(R, t);
+        proj_mat_2 = createProjMat(R_c, t_c);
 
         /*triangulate points*/
         point3d.clear();
@@ -479,12 +479,13 @@ int main()
         Rodrigues(R_w, R_vec);
         /*tampilkan variabel untuk diamati*/
         cout << "Frame " << frame << endl;
-        cout << proj_mat_1 << endl << proj_mat_2 << endl;
-//        cout << "Key1:" << keypoint_1.size() << " Key2:" << keypoint_2.size();
-//        cout << " Match1:" << good_matches.size();
-//        cout << " Inlier:" << countNonZero(mask) << "  " << "time: " << (clock() - time_star)/CLOCK_PER_SEC;
-//        cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
-//        cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
+//        cout << R_c << endl << t_c;
+//        cout << proj_mat_1 << endl << proj_mat_2 << endl;
+        cout << "Key1:" << keypoint_1.size() << " Key2:" << keypoint_2.size();
+        cout << " Match1:" << good_matches.size();
+        cout << " Inlier:" << countNonZero(mask) << "  " << "time: " << (clock() - time_star)/CLOCK_PER_SEC;
+        cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
+        cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
         cout << " ----------------------------------------------------------------------------" << endl;
 
         namedWindow( "Trajectory", WINDOW_AUTOSIZE );// Create a window for display.
@@ -505,7 +506,8 @@ int main()
 
         /*update variable*/
         //proj_mat_1 = (Mat_<double>(3,4) << 718.856, 0, 607.1928, 0, 0, 718.856, 185.2157, 0, 0, 0, 1, 0);
-        //proj_mat_1 = proj_mat_2.clone();
+        proj_mat_0 = proj_mat_1.clone();
+        proj_mat_1 = proj_mat_2.clone();
 
         keypoint_0 = keypoint_1;
         keypoint_1 = keypoint_2;
@@ -521,12 +523,21 @@ int main()
     sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame);
     Mat img_tes_2 = imread(filename, IMREAD_COLOR);
 
-    circle(img_tes_1, Point(point1.at(54).x, point1.at(54).y), 1, CV_RGB(255,0,0), 2);
-    circle(img_tes_2, Point(point2.at(54).x, point2.at(54).y), 1, CV_RGB(255,0,0), 2);
+    circle(img_tes_1, Point(point1.at(13).x, point1.at(13).y), 1, CV_RGB(255,0,0), 2);
+    circle(img_tes_2, Point(point2.at(13).x, point2.at(13).y), 1, CV_RGB(255,0,0), 2);
     imshow("frame_1",img_tes_1);
     imshow("frame_2",img_tes_2);
+    Mat R_vector;
+    double _dc[] = {0,0,0,0};
+
+    Rodrigues(R_c, R_vector);
+    vector<Point2d> reproject_point;
+
+    projectPoints(point3d, R_vector, t_c, K, Mat(1,4,CV_64FC1,_dc), reproject_point);
     cout << "3D point : ";
-    cout << "X: "<<point3d.at(54).x << " Y: " << point3d.at(54).y << " Z: " << point3d.at(54).z << endl ;
+    cout << "X: "<<point3d.at(13).x << " Y: " << point3d.at(13).y << " Z: " << point3d.at(13).z << endl ;
+    cout << "projected point x: "<<reproject_point.at(13).x << " y: " << reproject_point.at(13).y << endl ;
+    cout << "image point     x: "<<point2.at(13).x << " y: " << point2.at(13).y << endl ;
 
     imwrite("/media/dikysepta/DATA/Final Project/trajectory.png", traj);
     waitKey(0);
