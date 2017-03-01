@@ -35,12 +35,16 @@ Ptr<AKAZE> akaze = AKAZE::create();
 double focal = 718.856; //focal lenght
 Point2d pp(607.1928,185.2157); //principle point
 
-Mat img1, img2, img3;
+Mat first_img, curr_img;
 Mat R_w = Mat::eye(3,3,CV_64F), R_c = Mat::eye(3,3,CV_64F);
 Mat t_w = Mat::zeros(3,1,CV_64F), t_c = Mat::zeros(3,1,CV_64F);
 Mat K = (Mat_<double>(3,3) << 718.856, 0, 607.1928, 0, 718.856, 185.2157, 0, 0, 1);
 
-clock_t time_star, begin;
+Mat proj_mat_1 = (Mat_<double>(3,4) << 718.856, 0, 607.1928, 0, 0, 718.856, 185.2157, 0, 0, 0, 1, 0);
+Mat proj_mat_2 = Mat::zeros(3,4, CV_32FC1);
+Mat proj_mat_3 = Mat::zeros(3,4, CV_32FC1);
+
+clock_t time_per_frame;
 
 char text[100];
 int fontFace = FONT_HERSHEY_PLAIN;
@@ -48,16 +52,13 @@ double fontScale = 1;
 int thickness = 1;
 cv::Point textOrg(10, 50);
 Mat traj = Mat::zeros(600, 600, CV_8UC3);
-Mat proj_mat_1 = (Mat_<double>(3,4) << 718.856, 0, 607.1928, 0, 0, 718.856, 185.2157, 0, 0, 0, 1, 0);
-Mat proj_mat_2 = Mat::zeros(3,4, CV_32FC1);
-Mat proj_mat_3 = Mat::zeros(3,4, CV_32FC1);
 
-vector<KeyPoint> keypoint_1, keypoint_2, keypoint_0;
-Mat descriptor_1, descriptor_2, descriptor_3;
+vector<KeyPoint> prev_keypoint, curr_keypoint, keypoint_0;
+Mat prev_descriptor, curr_descriptor;
 vector<Point2f> point1, point2, match_1, match_2, match_3;
 vector<DMatch> prev_good_matches;
 
-vector<Point3d> pnp_3d_point;
+vector<Point3d> point3d;
 Mat pnp_4d_point; //homogenous coordinat
 
 Mat R_pnp;
@@ -149,14 +150,9 @@ vector<DMatch> matchFeature(Mat descriptor_1, Mat descriptor_2)
 {
     vector<DMatch> matches;//, good_matches;
 
-    clock_t timing = clock();
     BFMatcher matcher(NORM_L2);
-//    cout << "matching init :" << (clock()-timing)/CLOCK_PER_SEC << endl;
-//    timing = clock();
     matcher.match(descriptor_2, descriptor_1, matches); //paling lama
 
-//    cout << "matching match :" << (clock()-timing)/CLOCK_PER_SEC << endl;
-//    timing = clock();
     double max_dist = 0; double min_dist = 10000;
     //-- Quick calculation of max and min distances between keypoints
     for(unsigned int i = 0; i < matches.size(); i++ )
@@ -165,8 +161,6 @@ vector<DMatch> matchFeature(Mat descriptor_1, Mat descriptor_2)
         if( dist < min_dist ) min_dist = dist;
         if( dist > max_dist ) max_dist = dist;
     }
-//    cout << "matching min max :" << (clock()-timing)/CLOCK_PER_SEC << endl;
-//    timing = clock();
     int count = 0;
     int bound = matches.size();
     for( int i = 0; i < bound; i++ )
@@ -178,7 +172,6 @@ vector<DMatch> matchFeature(Mat descriptor_1, Mat descriptor_2)
         else
             count++;
     }
-//    cout << "matching remove :" << (clock()-timing)/CLOCK_PER_SEC << endl;
 
     return matches;
 }
@@ -269,9 +262,7 @@ Mat createProjMat(Mat R, Mat t)
     return temp;
 }
 
-/**
- From "Triangulation", Hartley, R.I. and Sturm, P., Computer vision and image understanding, 1997
- */
+/* From "Triangulation", Hartley, R.I. and Sturm, P., Computer vision and image understanding, 1997 */
 Mat triangulate_Linear_LS(Mat mat_P_l, Mat mat_P_r, Mat warped_back_l, Mat warped_back_r)
 {
     Mat A(4,3,CV_64FC1), b(4,1,CV_64FC1), X(3,1,CV_64FC1), X_homogeneous(4,1,CV_64FC1), W(1,1,CV_64FC1);
@@ -393,32 +384,29 @@ double estimateScale(Mat P_1,Mat P_2,Mat P_3, vector<Point2f> matched_1, vector<
 
 int main()
 {
-    vector<Point3d> point3d;
-    Mat point4d;
-    hconcat(R_w, t_w, proj_mat_1);
     /*Inisialisasi Mode*/
-    img1 = captureImage(0);
+    first_img = captureImage(0);
 
     /*extract feature and compute descriptors*/
-    star->detect(img1,keypoint_1);
-    surf->compute(img1, keypoint_1, descriptor_1);
-    int last_frame;
+    star->detect(first_img,prev_keypoint);
+    surf->compute(first_img, prev_keypoint, prev_descriptor);
+
     for(int frame = 1; frame < MAX_FRAME; frame++)
     {
-        cout << "Frame " << frame << endl;
-        time_star = clock();
+        /*Start time elapsed*/
+        time_per_frame = clock();
         /*Capture new frame*/
-        img2 = captureImage(frame);
+        curr_img = captureImage(frame);
 
         /*Detect keypoint and compute descriptors*/
-        star->detect(img2,keypoint_2);
-        surf->compute(img2, keypoint_2, descriptor_2);
+        star->detect(curr_img, curr_keypoint);
+        surf->compute(curr_img, curr_keypoint, curr_descriptor);
 
         /*Matching feature from two images*/
-        vector<DMatch> good_matches = matchFeature(descriptor_1, descriptor_2);
+        vector<DMatch> good_matches = matchFeature(prev_descriptor, curr_descriptor);
 
         /*Membuat vector point sesuai feature yang cocok agar bisa digunakan findessentialmat()*/
-        matchTwoPoints(good_matches, keypoint_1, keypoint_2, point1, point2);
+        matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
 
         /*Hitung Essential matrix using ransac*/
         Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0);
@@ -428,26 +416,11 @@ int main()
         recoverPose(E, point1, point2, R, t, focal, pp, mask);
 
         Mat imgout;
-        drawKeypoints(img2, keypoint_2, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+        drawKeypoints(curr_img, curr_keypoint, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
         imshow("matches", imgout);
 
         /*Hitung matrix rotasi dan translasi*/
         /*Hitung scalenya*/
-//        double scale;
-//        if(frame == 1)
-//        {
-//            hconcat(R, t, proj_mat_2);
-//            proj_mat_2 = K * proj_mat_2;
-//            scale = 1;
-//        }
-//        else if(frame > 1)
-//        {
-//            Mat t_temp = -R_w.t()*t_w+t;
-//            hconcat(R_w.t()*R, -R_w.t()*t_w + t, proj_mat_3); //proj_matrix yang belum ada scalenya
-//            proj_mat_3 = K * proj_mat_3;
-//            matchThreePoints(prev_good_matches, good_matches , keypoint_0, keypoint_1, keypoint_2, match_1, match_2, match_3);
-//            scale = estimateScale(proj_mat_1, proj_mat_2, proj_mat_3, match_1, match_2, match_3);
-//        }
         double scale = getAbsoluteScale(frame);
         if(frame == 1)
         {
@@ -463,28 +436,16 @@ int main()
             R_c = R_w.t();
             t_c = -R_c*t_w;
         }
-        proj_mat_2 = createProjMat(R, t);
 
-        /*triangulate points*/
-        point3d.clear();
-        TriangulatePoints(point1, point2, K.inv(), proj_mat_1, proj_mat_2, point3d);
-        //triangulatePoints(proj_mat_1, proj_mat_2, point1, point2, point4d);
-        for(int i = 0; i < point1.size(); i++)
-        {
-            //cout <<  "X: " << point4d.at<double>(0,i)/point4d.at<double>(3,i) << " Y: " << point4d.at<double>(1,i)/point4d.at<double>(3,i) << " Z: " << point4d.at<double>(2,i)/point4d.at<double>(3,i) << endl;//" coba :" ;
-            //cout << "X: "<<point3d.at(i).x << " Y: " << point3d.at(i).y << " Z: " << point3d.at(i).z << endl ;
-        }
-
+        /*tampilkan variabel untuk diamati*/
         Mat R_vec;
         Rodrigues(R_w, R_vec);
-        /*tampilkan variabel untuk diamati*/
         cout << "Frame " << frame << endl;
-        cout << proj_mat_1 << endl << proj_mat_2 << endl;
-//        cout << "Key1:" << keypoint_1.size() << " Key2:" << keypoint_2.size();
-//        cout << " Match1:" << good_matches.size();
-//        cout << " Inlier:" << countNonZero(mask) << "  " << "time: " << (clock() - time_star)/CLOCK_PER_SEC;
-//        cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
-//        cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
+        cout << "Key1:" << prev_keypoint.size() << " Key2:" << curr_keypoint.size();
+        cout << " Match1:" << good_matches.size();
+        cout << " Inlier:" << countNonZero(mask) << "  " << "time: " << (clock() - time_per_frame)/CLOCK_PER_SEC;
+        cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
+        cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
         cout << " ----------------------------------------------------------------------------" << endl;
 
         namedWindow( "Trajectory", WINDOW_AUTOSIZE );// Create a window for display.
@@ -492,7 +453,7 @@ int main()
         Point3f pose_true = getGroundTruth(frame);
         int x_true = int(pose_true.x) + 300;
         int y_true = -int(pose_true.z) + 500;
-        circle(traj, Point(x_true, y_true) ,1, CV_RGB(0,0,255), 2);
+        circle(traj, Point(x_true, y_true) ,1, CV_RGB(0,0,255), 0);
 
         int x = int(t_w.at<double>(0,0)) + 300;
         int y = -int(t_w.at<double>(2,0)) + 500;
@@ -504,31 +465,10 @@ int main()
         imshow( "Trajectory", traj );
 
         /*update variable*/
-        //proj_mat_1 = (Mat_<double>(3,4) << 718.856, 0, 607.1928, 0, 0, 718.856, 185.2157, 0, 0, 0, 1, 0);
-        //proj_mat_1 = proj_mat_2.clone();
-
-        keypoint_0 = keypoint_1;
-        keypoint_1 = keypoint_2;
-        descriptor_1 = descriptor_2.clone();
-        prev_good_matches = good_matches;
+        prev_keypoint = curr_keypoint;
+        prev_descriptor = curr_descriptor.clone();
 
         waitKey(1);
-        last_frame = frame;
     }
-    char filename[255];
-    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-1);
-    Mat img_tes_1 = imread(filename, IMREAD_COLOR);
-    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame);
-    Mat img_tes_2 = imread(filename, IMREAD_COLOR);
-
-    circle(img_tes_1, Point(point1.at(54).x, point1.at(54).y), 1, CV_RGB(255,0,0), 2);
-    circle(img_tes_2, Point(point2.at(54).x, point2.at(54).y), 1, CV_RGB(255,0,0), 2);
-    imshow("frame_1",img_tes_1);
-    imshow("frame_2",img_tes_2);
-    cout << "3D point : ";
-    cout << "X: "<<point3d.at(54).x << " Y: " << point3d.at(54).y << " Z: " << point3d.at(54).z << endl ;
-
-    imwrite("/media/dikysepta/DATA/Final Project/trajectory.png", traj);
-    waitKey(0);
     return 0;
 }
