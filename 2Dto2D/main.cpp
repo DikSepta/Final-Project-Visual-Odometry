@@ -16,7 +16,7 @@ using namespace std;
 using namespace cv;
 using namespace cv::xfeatures2d;
 
-#define MAX_FRAME 15
+#define MAX_FRAME 150
 #define CLOCK_PER_SEC 1000
 #define STAR_MAXSIZE 30
 #define STAR_RESPONSE_TH 20
@@ -25,6 +25,7 @@ using namespace cv::xfeatures2d;
 #define STAR_NONMAXSUPP 3
 #define MATCHING_TH 0.2
 #define MAX_POINT_THRESHOLD 500
+#define BA_FRAME 5
 
 Ptr<StarDetector> star = StarDetector::create(STAR_MAXSIZE,STAR_RESPONSE_TH,STAR_LINEBACKPROJ,STAR_LINEBACKBIN,STAR_NONMAXSUPP);
 Ptr<BRISK> brisk = BRISK::create();
@@ -58,8 +59,12 @@ Mat prev_descriptor, curr_descriptor;
 vector<Point2f> point1, point2, match_1, match_2, match_3;
 vector<DMatch> prev_good_matches;
 
-vector<Point3d> point3d;
-Mat pnp_4d_point; //homogenous coordinat
+vector<vector<DMatch>> match;
+vector<Mat> R_BA, t_BA;
+vector<Point3d> object_point;
+vector<vector<KeyPoint>> feature_point;
+vector<unsigned int> visibility;
+vector<vector<Point2f>> point_correspondence;
 
 Mat R_pnp;
 Mat R_vec = Mat::zeros(3,1,CV_64FC1);
@@ -382,9 +387,111 @@ double estimateScale(Mat P_1,Mat P_2,Mat P_3, vector<Point2f> matched_1, vector<
     return scale;
 }
 
+void bundleInit()
+{
+    match.resize(BA_FRAME - 1);
+    visibility.resize(BA_FRAME);
+    R_BA.resize(BA_FRAME);
+    t_BA.resize(BA_FRAME);
+    feature_point.resize(BA_FRAME);
+
+    for(int i = 0; i < BA_FRAME; i++)
+    {
+        R_BA.at(i) = Mat::eye(3,3,CV_64F);
+        t_BA.at(i) = Mat::zeros(3,1,CV_64F);
+    }
+}
+
+void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2f>> &output_point)
+{
+    int num = match_id.size();
+    for(int i = 0; i < num - 1; i++)
+    {
+        vector<DMatch> curr_match = match_id.at(i);
+        vector<DMatch> next_match = match_id.at(i+1);
+        vector<DMatch> temp_curr_match, temp_next_match;
+
+        for(unsigned int j = 0; j < next_match.size(); j++)
+        {
+            for(unsigned int k = 0; k < curr_match.size(); k++)
+            {
+                if(next_match.at(j).trainIdx == curr_match.at(k).queryIdx)
+                {
+                    temp_curr_match.push_back(curr_match.at(k));
+                    temp_next_match.push_back(next_match.at(j));
+                    break;
+                }
+            }
+            match_id.at(i) = temp_curr_match;
+            match_id.at(i+1) = temp_next_match;
+        }
+    }
+    for(int i = num - 1; i > 0; i--)
+    {
+        vector<DMatch> curr_match = match_id.at(i);
+        vector<DMatch> prev_match = match_id.at(i-1);
+        vector<DMatch> temp_prev_match;
+
+        for(unsigned int j = 0; j < curr_match.size(); j++)
+        {
+            for(unsigned int k = 0; k < prev_match.size(); k++)
+            {
+                if(curr_match.at(j).trainIdx == prev_match.at(k).queryIdx)
+                {
+                    temp_prev_match.push_back(prev_match.at(k));
+                    break;
+                }
+            }
+            match_id.at(i-1) = temp_prev_match;
+        }
+    }
+
+    int num_key = key_point.size();
+    vector<vector<Point2f>> point;
+    output_point.resize(num_key);
+    point.resize(num_key);
+
+    for(int i = 0; i < num_key; i++)
+    {
+        vector<Point2f> temp_point;
+        KeyPoint::convert(key_point.at(i), point.at(i));
+        vector<Point2f> curr_point = point.at(i);
+
+        if(i < num_key - 1)
+        {
+            vector<DMatch> curr_match = match_id.at(i);
+            for(unsigned int j = 0; j < curr_match.size(); j++)
+            {
+                temp_point.push_back(curr_point.at(curr_match.at(j).trainIdx));
+            }
+        }
+        else
+        {
+            vector<DMatch> curr_match = match_id.at(i - 1);
+            for(unsigned int j = 0; j < curr_match.size(); j++)
+            {
+                temp_point.push_back(curr_point.at(curr_match.at(j).queryIdx));
+            }
+        }
+        output_point.at(i) = temp_point;
+    }
+    cout << "Match ID" << endl;
+    cout << "1: " << match_id.at(0).size();
+    cout << " 2: " << match_id.at(1).size();
+    cout << " 3: " << match_id.at(2).size();
+    cout << " 4: " << match_id.at(3).size() << endl;
+    cout << "Output point" << endl;
+    cout << "1: " << output_point.at(0).size();
+    cout << " 2: " << output_point.at(1).size();
+    cout << " 3: " << output_point.at(2).size();
+    cout << " 4: " << output_point.at(3).size();
+    cout << " 5: " << output_point.at(4).size() << endl;
+}
+
 int main()
 {
     /*Inisialisasi Mode*/
+    bundleInit();
     first_img = captureImage(0);
 
     /*extract feature and compute descriptors*/
@@ -393,7 +500,7 @@ int main()
 
     for(int frame = 1; frame < MAX_FRAME; frame++)
     {
-        /*Start time elapsed*/
+        /*Start counting elapsed time*/
         time_per_frame = clock();
         /*Capture new frame*/
         curr_img = captureImage(frame);
@@ -401,9 +508,50 @@ int main()
         /*Detect keypoint and compute descriptors*/
         star->detect(curr_img, curr_keypoint);
         surf->compute(curr_img, curr_keypoint, curr_descriptor);
+        /*store the keypoint*/
+        if(frame <= BA_FRAME)
+        {
+            feature_point.at(frame - 1) = curr_keypoint;
+        }
+        else
+        {
+            for(int i = 0; i < BA_FRAME - 1; i++)
+            {
+                feature_point.at(i) = feature_point.at(i+1);
+            }
+            feature_point.at(BA_FRAME - 1) = curr_keypoint;
+        }
+        cout << "1: " << feature_point.at(0).size();
+        cout << " 2: " << feature_point.at(1).size();
+        cout << " 3: " << feature_point.at(2).size();
+        cout << " 4: " << feature_point.at(3).size();
+        cout << " 5: " << feature_point.at(4).size() << endl;
 
         /*Matching feature from two images*/
         vector<DMatch> good_matches = matchFeature(prev_descriptor, curr_descriptor);
+        /*store the matched feature*/
+        if(frame < BA_FRAME)
+        {
+            match.at(frame - 1) = good_matches;
+        }
+        else
+        {
+            for(int i = 0; i < BA_FRAME - 2; i++)
+            {
+                match.at(i) = match.at(i+1);
+            }
+            match.at(BA_FRAME - 2) = good_matches;
+        }
+
+        if(frame >= BA_FRAME)
+        {
+            matchpoints(match, feature_point, point_correspondence);
+        }
+
+//        cout << "1: " << match.at(0).size();
+//        cout << " 2: " << match.at(1).size();
+//        cout << " 3: " << match.at(2).size();
+//        cout << " 4: " << match.at(3).size() << endl;
 
         /*Membuat vector point sesuai feature yang cocok agar bisa digunakan findessentialmat()*/
         matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
@@ -419,7 +567,7 @@ int main()
         drawKeypoints(curr_img, curr_keypoint, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
         imshow("matches", imgout);
 
-        /*Hitung matrix rotasi dan translasi*/
+        /*Update matrix rotasi dan translasi*/
         /*Hitung scalenya*/
         double scale = getAbsoluteScale(frame);
         if(frame == 1)
