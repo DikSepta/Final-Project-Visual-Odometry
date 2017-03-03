@@ -23,9 +23,10 @@ using namespace cv::xfeatures2d;
 #define STAR_LINEBACKPROJ 10
 #define STAR_LINEBACKBIN 8
 #define STAR_NONMAXSUPP 3
-#define MATCHING_TH 0.2
+#define MATCHING_TH 0.35
 #define MAX_POINT_THRESHOLD 500
 #define BA_FRAME 5
+#define MAX_3D_POINT 5
 
 Ptr<StarDetector> star = StarDetector::create(STAR_MAXSIZE,STAR_RESPONSE_TH,STAR_LINEBACKPROJ,STAR_LINEBACKBIN,STAR_NONMAXSUPP);
 Ptr<BRISK> brisk = BRISK::create();
@@ -63,10 +64,12 @@ vector<vector<DMatch>> match;
 vector<Mat> R_BA, t_BA;
 vector<Point3d> object_point;
 vector<vector<KeyPoint>> feature_point;
-vector<unsigned int> visibility;
-vector<vector<Point2f>> point_correspondence;
+vector<vector<int>> visibility;
+vector<vector<Point2d>> point_correspondence;
+vector<Mat> camera_matrix;
+vector<Mat> dist_coeff;
 
-double _dc[] = {0,0,0,0};
+double _dc[] = {0,0,0,0,0};
 
 Point3f getGroundTruth(int frame_id)
 {
@@ -290,27 +293,27 @@ Mat triangulate_Linear_LS(Mat mat_P_l, Mat mat_P_r, Mat warped_back_l, Mat warpe
 }
 
 //Triagulate points
-void TriangulatePoints(const vector<Point2f> pt_set1,
-                       const vector<Point2f> pt_set2,
+void TriangulatePoints(const vector<Point2d> pt_set1,
+                       const vector<Point2d> pt_set2,
                        const Mat Kinv,
                        const Mat P,
                        const Mat P1,
                        vector<Point3d>& pointcloud)
 {
-    vector<Point2f> point_1_hom, point_2_hom;
+    vector<Point2d> point_1_hom, point_2_hom;
     pointcloud.clear();
 
     unsigned int pts_size = pt_set1.size();
     for (unsigned int i=0; i < pts_size; i++)
     {
-        Point2f kp = pt_set1.at(i);
+        Point2d kp = pt_set1.at(i);
         Point3d u(kp.x,kp.y,1.0);
         Mat u_nh = (Mat_<double>(3,1) << kp.x, kp.y, 1.0);
         Mat um = Kinv * u_nh;
         u.x = um.at<double>(0,0);
         u.y = um.at<double>(1,0);
         u.z = um.at<double>(2,0);
-        Point2f kp1 = pt_set2.at(i);
+        Point2d kp1 = pt_set2.at(i);
         u_nh = (Mat_<double>(3,1) << kp1.x, kp1.y, 1.0);
         Point3d u1(kp1.x,kp1.y,1.0);
         Mat um1 = Kinv * u_nh;
@@ -386,7 +389,18 @@ double estimateScale(Mat P_1,Mat P_2,Mat P_3, vector<Point2f> matched_1, vector<
 void bundleInit()
 {
     match.resize(BA_FRAME - 1);
+
     visibility.resize(BA_FRAME);
+    for(int i = 0; i < BA_FRAME; i++)
+    {
+        visibility.at(i).resize(MAX_3D_POINT);
+    }
+    for(int i = 0; i < BA_FRAME; i++)
+    {
+        for(int j = 0; j < MAX_3D_POINT; j++)
+            visibility.at(i).at(j) = 1;
+    }
+
     R_BA.resize(BA_FRAME);
     t_BA.resize(BA_FRAME);
     feature_point.resize(BA_FRAME);
@@ -396,9 +410,21 @@ void bundleInit()
         R_BA.at(i) = Mat::eye(3,3,CV_64F);
         t_BA.at(i) = Mat::zeros(3,1,CV_64F);
     }
+
+    camera_matrix.resize(BA_FRAME);
+    for(int i = 0; i < BA_FRAME; i++)
+    {
+        camera_matrix.at(i) = K.clone();
+    }
+
+    dist_coeff.resize(BA_FRAME);
+    for(int i = 0; i < BA_FRAME; i++)
+    {
+        dist_coeff.at(i) = Mat(1,4,CV_64FC1,_dc);
+    }
 }
 
-void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2f>> &output_point, int point_size)
+void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2d>> &output_point, int point_size)
 {
     int num = match_id.size();
     for(int i = 0; i < num - 1; i++)
@@ -444,12 +470,13 @@ void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_p
 
     int num_key = key_point.size();
     vector<vector<Point2f>> point;
+
     output_point.resize(num_key);
     point.resize(num_key);
 
     for(int i = 0; i < num_key; i++)
     {
-        vector<Point2f> temp_point;
+        vector<Point2d> temp_point;
         KeyPoint::convert(key_point.at(i), point.at(i));
         vector<Point2f> curr_point = point.at(i);
 
@@ -458,7 +485,7 @@ void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_p
             vector<DMatch> curr_match = match_id.at(i);
             for(unsigned int j = 0; j < curr_match.size(); j++)
             {
-                temp_point.push_back(curr_point.at(curr_match.at(j).trainIdx));
+                temp_point.push_back((Point2d)curr_point.at(curr_match.at(j).trainIdx));
             }
         }
         else
@@ -466,53 +493,58 @@ void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_p
             vector<DMatch> curr_match = match_id.at(i - 1);
             for(unsigned int j = 0; j < curr_match.size(); j++)
             {
-                temp_point.push_back(curr_point.at(curr_match.at(j).queryIdx));
+                temp_point.push_back((Point2d)curr_point.at(curr_match.at(j).queryIdx));
             }
         }
         output_point.at(i) = temp_point;
-        if(output_point.at(i).size() > point_size)
+        if((int)output_point.at(i).size() > point_size)
         {
             output_point.at(i).erase(output_point.at(i).begin() + point_size, output_point.at(i).end());
         }
     }
-//    cout << "Match ID" << endl;
-//    cout << "1: " << match_id.at(0).size();
-//    cout << " 2: " << match_id.at(1).size();
-//    cout << " 3: " << match_id.at(2).size();
-//    cout << " 4: " << match_id.at(3).size() << endl;
-//    cout << "Output point" << endl;
-//    cout << "1: " << output_point.at(0).size();
-//    cout << " 2: " << output_point.at(1).size();
-//    cout << " 3: " << output_point.at(2).size();
-//    cout << " 4: " << output_point.at(3).size();
-//    cout << " 5: " << output_point.at(4).size() << endl;
+    cout << "Match ID" << endl;
+    cout << "1: " << match_id.at(0).size();
+    cout << " 2: " << match_id.at(1).size();
+    cout << " 3: " << match_id.at(2).size();
+    cout << " 4: " << match_id.at(3).size() << endl;
+    cout << "Output point" << endl;
+    cout << "1: " << output_point.at(0).size();
+    cout << " 2: " << output_point.at(1).size();
+    cout << " 3: " << output_point.at(2).size();
+    cout << " 4: " << output_point.at(3).size();
+    cout << " 5: " << output_point.at(4).size() << endl;
 }
 
 /* inlier posisinya seseuai dengan train_point, ukurane harus sama */
-void removeOutlier(vector<DMatch> match_id, vector<Point2f> train_point, Mat inlier)
+void removeOutlier(vector<DMatch> &match_id, vector<KeyPoint> train_keypoint, vector<Point2f> train_point, Mat inlier)
 {
+    vector<Point2f> raw_train_point;
     vector<DMatch> temp_match;
     vector<Point2f> inlier_point;
     int pts_size = train_point.size();
 
-    cout << match_id.size() << " " << inlier.rows << " " << train_point.size() << endl;
+    KeyPoint::convert(train_keypoint, raw_train_point);
+//    cout << match_id.size() << " " << inlier.rows << " " << train_point.size() << " " << raw_train_point.size() << endl;
 
     for(int i = 0; i < pts_size; i++)
     {
         if(inlier.at<unsigned char>(i,0))
             inlier_point.push_back(train_point.at(i));
     }
-    for(int i = 0; i < pts_size; i++)
+//    cout << inlier_point.size() << endl;
+    for(unsigned int j = 0; j < inlier_point.size(); j++)
     {
-        for(unsigned int j = 0; j < inlier_point.size(); j++)
+        for(int i = 0; i < pts_size; i++)
         {
-            if(train_point.at(match_id.at(i).trainIdx) == inlier_point.at(j))
+            if(raw_train_point.at(match_id.at(i).trainIdx) == inlier_point.at(j))
             {
                 temp_match.push_back(match_id.at(i));
                 break;
             }
         }
     }
+//    cout << temp_match.size() << endl;
+    match_id = temp_match;
 }
 
 int main()
@@ -552,6 +584,23 @@ int main()
 
         /*Matching feature from two images*/
         vector<DMatch> good_matches = matchFeature(prev_descriptor, curr_descriptor);
+
+        /*Membuat vector point sesuai feature yang cocok agar bisa digunakan findessentialmat()*/
+        matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
+
+        /*Hitung Essential matrix using ransac*/
+        Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0);
+
+        /*Hitung extrinsic matrix*/
+        Mat R, t, inlier;
+        recoverPose(E, point1, point2, R, t, focal, pp, inlier);
+
+        removeOutlier(good_matches, prev_keypoint, point1, inlier);
+
+        Mat imgout;
+        drawKeypoints(curr_img, curr_keypoint, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+        imshow("matches", imgout);
+
         /*store the matched feature*/
         if(frame < BA_FRAME)
         {
@@ -568,23 +617,8 @@ int main()
 
         if(frame >= BA_FRAME)
         {
-            matchpoints(match, feature_point, point_correspondence, BA_FRAME);
+            matchpoints(match, feature_point, point_correspondence, MAX_3D_POINT);
         }
-
-        /*Membuat vector point sesuai feature yang cocok agar bisa digunakan findessentialmat()*/
-        matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
-
-        /*Hitung Essential matrix using ransac*/
-        Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0);
-
-        /*Hitung extrinsic matrix*/
-        Mat R, t, inlier;
-        recoverPose(E, point1, point2, R, t, focal, pp, inlier);
-
-        Mat imgout;
-        drawKeypoints(curr_img, curr_keypoint, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
-        imshow("matches", imgout);
-
         /*Update matrix rotasi dan translasi*/
         /*Hitung scalenya*/
         double scale = getAbsoluteScale(frame);
@@ -619,28 +653,20 @@ int main()
             Rodrigues(R_c, R_BA.at(BA_FRAME - 1));
             t_BA.at(BA_FRAME - 1) = t_c.clone();
         }
-        vector<Point3d> point_3D;
-        Mat R_tr, t_tr;
 
-        Rodrigues(R_BA.at(0), R_tr);
-        t_tr = t_BA.at(0).clone();
-        proj_mat_1 = createProjMat(R_tr, t_tr);
+        Mat R_tr, t_tr;
 
         Rodrigues(R_BA.at(1), R_tr);
         t_tr = t_BA.at(1).clone();
-        proj_mat_2 = createProjMat(R_tr, t_tr);
+        proj_mat_1 = createProjMat(R_tr, t_tr);
 
         Rodrigues(R_BA.at(2), R_tr);
         t_tr = t_BA.at(2).clone();
-        proj_mat_3 = createProjMat(R_tr, t_tr);
+        proj_mat_2 = createProjMat(R_tr, t_tr);
+
         if(frame >= BA_FRAME)
         {
-            TriangulatePoints(point_correspondence.at(0), point_correspondence.at(1), K.inv(), proj_mat_1, proj_mat_2, point_3D);
-            cout << "3D point 1 : " << endl << point_3D.at(0).x << ", " << point_3D.at(0).y << ", " << point_3D.at(0).z << endl;
-            point_3D.clear();
-            TriangulatePoints(point_correspondence.at(1), point_correspondence.at(2), K.inv(), proj_mat_2, proj_mat_3, point_3D);
-            cout << "3D point 2 : " << endl << point_3D.at(0).x << ", " << point_3D.at(0).y << ", " << point_3D.at(0).z << endl;
-
+            TriangulatePoints(point_correspondence.at(0), point_correspondence.at(1), K.inv(), proj_mat_1, proj_mat_2, object_point);
         }
 //        cout << "R1 : " << R_BA.at(0) << endl << " t1 : " << t_BA.at(0) << endl;
 //        cout << " R2 : " << R_BA.at(1) << endl << " t2 : " << t_BA.at(1)<< endl;
