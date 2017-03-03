@@ -66,10 +66,6 @@ vector<vector<KeyPoint>> feature_point;
 vector<unsigned int> visibility;
 vector<vector<Point2f>> point_correspondence;
 
-Mat R_pnp;
-Mat R_vec = Mat::zeros(3,1,CV_64FC1);
-Mat t_vec = Mat::zeros(3,1,CV_64FC1);
-Mat mask1;
 double _dc[] = {0,0,0,0};
 
 Point3f getGroundTruth(int frame_id)
@@ -402,7 +398,7 @@ void bundleInit()
     }
 }
 
-void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2f>> &output_point)
+void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2f>> &output_point, int point_size)
 {
     int num = match_id.size();
     for(int i = 0; i < num - 1; i++)
@@ -474,18 +470,49 @@ void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_p
             }
         }
         output_point.at(i) = temp_point;
+        if(output_point.at(i).size() > point_size)
+        {
+            output_point.at(i).erase(output_point.at(i).begin() + point_size, output_point.at(i).end());
+        }
     }
-    cout << "Match ID" << endl;
-    cout << "1: " << match_id.at(0).size();
-    cout << " 2: " << match_id.at(1).size();
-    cout << " 3: " << match_id.at(2).size();
-    cout << " 4: " << match_id.at(3).size() << endl;
-    cout << "Output point" << endl;
-    cout << "1: " << output_point.at(0).size();
-    cout << " 2: " << output_point.at(1).size();
-    cout << " 3: " << output_point.at(2).size();
-    cout << " 4: " << output_point.at(3).size();
-    cout << " 5: " << output_point.at(4).size() << endl;
+//    cout << "Match ID" << endl;
+//    cout << "1: " << match_id.at(0).size();
+//    cout << " 2: " << match_id.at(1).size();
+//    cout << " 3: " << match_id.at(2).size();
+//    cout << " 4: " << match_id.at(3).size() << endl;
+//    cout << "Output point" << endl;
+//    cout << "1: " << output_point.at(0).size();
+//    cout << " 2: " << output_point.at(1).size();
+//    cout << " 3: " << output_point.at(2).size();
+//    cout << " 4: " << output_point.at(3).size();
+//    cout << " 5: " << output_point.at(4).size() << endl;
+}
+
+/* inlier posisinya seseuai dengan train_point, ukurane harus sama */
+void removeOutlier(vector<DMatch> match_id, vector<Point2f> train_point, Mat inlier)
+{
+    vector<DMatch> temp_match;
+    vector<Point2f> inlier_point;
+    int pts_size = train_point.size();
+
+    cout << match_id.size() << " " << inlier.rows << " " << train_point.size() << endl;
+
+    for(int i = 0; i < pts_size; i++)
+    {
+        if(inlier.at<unsigned char>(i,0))
+            inlier_point.push_back(train_point.at(i));
+    }
+    for(int i = 0; i < pts_size; i++)
+    {
+        for(unsigned int j = 0; j < inlier_point.size(); j++)
+        {
+            if(train_point.at(match_id.at(i).trainIdx) == inlier_point.at(j))
+            {
+                temp_match.push_back(match_id.at(i));
+                break;
+            }
+        }
+    }
 }
 
 int main()
@@ -497,6 +524,7 @@ int main()
     /*extract feature and compute descriptors*/
     star->detect(first_img,prev_keypoint);
     surf->compute(first_img, prev_keypoint, prev_descriptor);
+    feature_point.at(0) = prev_keypoint;
 
     for(int frame = 1; frame < MAX_FRAME; frame++)
     {
@@ -509,9 +537,9 @@ int main()
         star->detect(curr_img, curr_keypoint);
         surf->compute(curr_img, curr_keypoint, curr_descriptor);
         /*store the keypoint*/
-        if(frame <= BA_FRAME)
+        if(frame < BA_FRAME)
         {
-            feature_point.at(frame - 1) = curr_keypoint;
+            feature_point.at(frame) = curr_keypoint;
         }
         else
         {
@@ -521,11 +549,6 @@ int main()
             }
             feature_point.at(BA_FRAME - 1) = curr_keypoint;
         }
-        cout << "1: " << feature_point.at(0).size();
-        cout << " 2: " << feature_point.at(1).size();
-        cout << " 3: " << feature_point.at(2).size();
-        cout << " 4: " << feature_point.at(3).size();
-        cout << " 5: " << feature_point.at(4).size() << endl;
 
         /*Matching feature from two images*/
         vector<DMatch> good_matches = matchFeature(prev_descriptor, curr_descriptor);
@@ -545,13 +568,8 @@ int main()
 
         if(frame >= BA_FRAME)
         {
-            matchpoints(match, feature_point, point_correspondence);
+            matchpoints(match, feature_point, point_correspondence, BA_FRAME);
         }
-
-//        cout << "1: " << match.at(0).size();
-//        cout << " 2: " << match.at(1).size();
-//        cout << " 3: " << match.at(2).size();
-//        cout << " 4: " << match.at(3).size() << endl;
 
         /*Membuat vector point sesuai feature yang cocok agar bisa digunakan findessentialmat()*/
         matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
@@ -560,8 +578,8 @@ int main()
         Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0);
 
         /*Hitung extrinsic matrix*/
-        Mat R, t, mask;
-        recoverPose(E, point1, point2, R, t, focal, pp, mask);
+        Mat R, t, inlier;
+        recoverPose(E, point1, point2, R, t, focal, pp, inlier);
 
         Mat imgout;
         drawKeypoints(curr_img, curr_keypoint, imgout, Scalar(0,255,255),DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
@@ -585,13 +603,58 @@ int main()
             t_c = -R_c*t_w;
         }
 
+        /*store R and t vector to be used by Bundle Adjustment*/
+        if(frame < BA_FRAME)
+        {
+            Rodrigues(R_c, R_BA.at(frame));
+            t_BA.at(frame) = t_c.clone();
+        }
+        else
+        {
+            for(int i = 0; i < BA_FRAME - 1; i++)
+            {
+                R_BA.at(i) = R_BA.at(i+1).clone();
+                t_BA.at(i) = t_BA.at(i+1).clone();
+            }
+            Rodrigues(R_c, R_BA.at(BA_FRAME - 1));
+            t_BA.at(BA_FRAME - 1) = t_c.clone();
+        }
+        vector<Point3d> point_3D;
+        Mat R_tr, t_tr;
+
+        Rodrigues(R_BA.at(0), R_tr);
+        t_tr = t_BA.at(0).clone();
+        proj_mat_1 = createProjMat(R_tr, t_tr);
+
+        Rodrigues(R_BA.at(1), R_tr);
+        t_tr = t_BA.at(1).clone();
+        proj_mat_2 = createProjMat(R_tr, t_tr);
+
+        Rodrigues(R_BA.at(2), R_tr);
+        t_tr = t_BA.at(2).clone();
+        proj_mat_3 = createProjMat(R_tr, t_tr);
+        if(frame >= BA_FRAME)
+        {
+            TriangulatePoints(point_correspondence.at(0), point_correspondence.at(1), K.inv(), proj_mat_1, proj_mat_2, point_3D);
+            cout << "3D point 1 : " << endl << point_3D.at(0).x << ", " << point_3D.at(0).y << ", " << point_3D.at(0).z << endl;
+            point_3D.clear();
+            TriangulatePoints(point_correspondence.at(1), point_correspondence.at(2), K.inv(), proj_mat_2, proj_mat_3, point_3D);
+            cout << "3D point 2 : " << endl << point_3D.at(0).x << ", " << point_3D.at(0).y << ", " << point_3D.at(0).z << endl;
+
+        }
+//        cout << "R1 : " << R_BA.at(0) << endl << " t1 : " << t_BA.at(0) << endl;
+//        cout << " R2 : " << R_BA.at(1) << endl << " t2 : " << t_BA.at(1)<< endl;
+//        cout << " R3 : " << R_BA.at(2) << endl <<  " t3 : " << t_BA.at(2)<< endl;
+//        cout << " R4 : " << R_BA.at(3) << endl <<  " t4 : " << t_BA.at(3)<< endl;
+//        cout << " R5 : " << R_BA.at(4) << endl <<  " t5 : " << t_BA.at(4) << endl;
+
         /*tampilkan variabel untuk diamati*/
         Mat R_vec;
         Rodrigues(R_w, R_vec);
         cout << "Frame " << frame << endl;
         cout << "Key1:" << prev_keypoint.size() << " Key2:" << curr_keypoint.size();
         cout << " Match1:" << good_matches.size();
-        cout << " Inlier:" << countNonZero(mask) << "  " << "time: " << (clock() - time_per_frame)/CLOCK_PER_SEC;
+        cout << " Inlier:" << countNonZero(inlier) << "  " << "time: " << (clock() - time_per_frame)/CLOCK_PER_SEC;
         cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
         cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
         cout << " ----------------------------------------------------------------------------" << endl;
