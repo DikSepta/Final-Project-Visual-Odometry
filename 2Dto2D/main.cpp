@@ -16,17 +16,17 @@ using namespace std;
 using namespace cv;
 using namespace cv::xfeatures2d;
 
-#define MAX_FRAME 150
+#define MAX_FRAME 200
 #define CLOCK_PER_SEC 1000
 #define STAR_MAXSIZE 30
 #define STAR_RESPONSE_TH 20
 #define STAR_LINEBACKPROJ 10
 #define STAR_LINEBACKBIN 8
 #define STAR_NONMAXSUPP 3
-#define MATCHING_TH 0.35
+#define MATCHING_TH 0.2
 #define MAX_POINT_THRESHOLD 500
 #define BA_FRAME 5
-#define MAX_3D_POINT 5
+#define MAX_3D_POINT 12
 
 Ptr<StarDetector> star = StarDetector::create(STAR_MAXSIZE,STAR_RESPONSE_TH,STAR_LINEBACKPROJ,STAR_LINEBACKBIN,STAR_NONMAXSUPP);
 Ptr<BRISK> brisk = BRISK::create();
@@ -70,6 +70,8 @@ vector<Mat> camera_matrix;
 vector<Mat> dist_coeff;
 
 double _dc[] = {0,0,0,0,0};
+
+cvsba::Sba sba;
 
 Point3f getGroundTruth(int frame_id)
 {
@@ -420,8 +422,18 @@ void bundleInit()
     dist_coeff.resize(BA_FRAME);
     for(int i = 0; i < BA_FRAME; i++)
     {
-        dist_coeff.at(i) = Mat(1,4,CV_64FC1,_dc);
+        dist_coeff.at(i) = Mat(1,5,CV_64FC1,_dc);
     }
+
+    cvsba::Sba::Params param;
+    param.type = cvsba::Sba::MOTION;
+    param.fixedDistortion = 5;
+    param.fixedIntrinsics = 5;
+    param.iterations = 1000;
+    param.minError = 1e-3;
+    param.verbose = false;
+
+    sba.setParams(param);
 }
 
 void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_point, vector<vector<Point2d>> &output_point, int point_size)
@@ -505,14 +517,14 @@ void matchpoints(vector<vector<DMatch>> match_id, vector<vector<KeyPoint>> key_p
     cout << "Match ID" << endl;
     cout << "1: " << match_id.at(0).size();
     cout << " 2: " << match_id.at(1).size();
-    cout << " 3: " << match_id.at(2).size();
-    cout << " 4: " << match_id.at(3).size() << endl;
+//    cout << " 3: " << match_id.at(2).size();
+//    cout << " 4: " << match_id.at(3).size() << endl;
     cout << "Output point" << endl;
     cout << "1: " << output_point.at(0).size();
     cout << " 2: " << output_point.at(1).size();
     cout << " 3: " << output_point.at(2).size();
-    cout << " 4: " << output_point.at(3).size();
-    cout << " 5: " << output_point.at(4).size() << endl;
+//    cout << " 4: " << output_point.at(3).size();
+//    cout << " 5: " << output_point.at(4).size() << endl;
 }
 
 /* inlier posisinya seseuai dengan train_point, ukurane harus sama */
@@ -549,13 +561,14 @@ void removeOutlier(vector<DMatch> &match_id, vector<KeyPoint> train_keypoint, ve
 
 int main()
 {
+    int last_frame;
     /*Inisialisasi Mode*/
     bundleInit();
     first_img = captureImage(0);
 
     /*extract feature and compute descriptors*/
     star->detect(first_img,prev_keypoint);
-    surf->compute(first_img, prev_keypoint, prev_descriptor);
+    sift->compute(first_img, prev_keypoint, prev_descriptor);
     feature_point.at(0) = prev_keypoint;
 
     for(int frame = 1; frame < MAX_FRAME; frame++)
@@ -567,7 +580,7 @@ int main()
 
         /*Detect keypoint and compute descriptors*/
         star->detect(curr_img, curr_keypoint);
-        surf->compute(curr_img, curr_keypoint, curr_descriptor);
+        sift->compute(curr_img, curr_keypoint, curr_descriptor);
         /*store the keypoint*/
         if(frame < BA_FRAME)
         {
@@ -589,11 +602,13 @@ int main()
         matchTwoPoints(good_matches, prev_keypoint, curr_keypoint, point1, point2);
 
         /*Hitung Essential matrix using ransac*/
-        Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0);
+        Mat inlier;
+        Mat E = findEssentialMat(point1, point2, focal, pp, RANSAC, 0.9999, 1.0, inlier);
+        cout << countNonZero(inlier) << endl;
 
         /*Hitung extrinsic matrix*/
-        Mat R, t, inlier;
-        recoverPose(E, point1, point2, R, t, focal, pp, inlier);
+        Mat R, t;
+        recoverPose(E, point1, point2, R, t, focal, pp);
 
         removeOutlier(good_matches, prev_keypoint, point1, inlier);
 
@@ -621,9 +636,13 @@ int main()
         }
         /*Update matrix rotasi dan translasi*/
         /*Hitung scalenya*/
-        double scale = getAbsoluteScale(frame);
+        double scale = 1;//getAbsoluteScale(frame);
         if(frame == 1)
         {
+//            R_c = R;
+//            t_c = scale*t;
+//            R_w = R_c.t();
+//            t_w = -R_w*t_c;
             t_w = -scale*R.t()*t;
             R_w = R.t();
             R_c = R;
@@ -631,6 +650,10 @@ int main()
         }
         else
         {
+//            R_c = R*R_c;
+//            t_c = t_c + scale*t;
+//            R_w = R_c.t();
+//            t_w = -R_w*t_c;
             R_w = R.t()*R_w;
             t_w = t_w - scale*R_w*t;
             R_c = R_w.t();
@@ -656,33 +679,72 @@ int main()
 
         Mat R_tr, t_tr;
 
-        Rodrigues(R_BA.at(1), R_tr);
-        t_tr = t_BA.at(1).clone();
+        Rodrigues(R_BA.at(3), R_tr);
+        t_tr = t_BA.at(3).clone();
         proj_mat_1 = createProjMat(R_tr, t_tr);
+
+        Rodrigues(R_BA.at(4), R_tr);
+        t_tr = t_BA.at(4).clone();
+        proj_mat_2 = createProjMat(R_tr, t_tr);
 
         Rodrigues(R_BA.at(2), R_tr);
         t_tr = t_BA.at(2).clone();
-        proj_mat_2 = createProjMat(R_tr, t_tr);
+        proj_mat_3 = createProjMat(R_tr, t_tr);
+
+//        Rodrigues(R_BA.at(3), R_tr);
+//        t_tr = t_BA.at(3).clone();
+//        Mat proj_mat_4 = createProjMat(R_tr, t_tr);
+
+//        Rodrigues(R_BA.at(4), R_tr);
+//        t_tr = t_BA.at(4).clone();
+//        Mat proj_mat_5 = createProjMat(R_tr, t_tr);
 
         if(frame >= BA_FRAME)
         {
-            TriangulatePoints(point_correspondence.at(0), point_correspondence.at(1), K.inv(), proj_mat_1, proj_mat_2, object_point);
+            object_point.clear();
+            TriangulatePoints(point_correspondence.at(3), point_correspondence.at(4), K.inv(), proj_mat_1, proj_mat_2, object_point);
+            sba.run(object_point, point_correspondence, visibility, camera_matrix, R_BA, t_BA, dist_coeff);
+
+            /*update R and t with the sba result*/
+            Rodrigues(R_BA.at(BA_FRAME-1), R_w);
+            R_w = R_w.t();
+            t_w = - R_w * t_BA.at(BA_FRAME - 1);
+
+            cout << "Object Point 1 :" << endl;
+            cout << object_point << endl;
+            object_point.clear();
+            TriangulatePoints(point_correspondence.at(1), point_correspondence.at(2), K.inv(), proj_mat_2, proj_mat_3, object_point);
+            cout << "Object Point 2 :" << endl;
+            cout << object_point << endl;
+//            object_point.clear();
+//            TriangulatePoints(point_correspondence.at(2), point_correspondence.at(3), K.inv(), proj_mat_3, proj_mat_4, object_point);
+//            cout << "Object Point 3 :" << endl;
+//            cout << object_point << endl;
+//            object_point.clear();
+//            TriangulatePoints(point_correspondence.at(3), point_correspondence.at(4), K.inv(), proj_mat_4, proj_mat_5, object_point);
+//            cout << "Object Point 4 :" << endl;
+//            cout << object_point << endl;
+
+            cout << sba.getInitialReprjError() << endl;
+            cout << sba.getFinalReprjError() << endl;
         }
-//        cout << "R1 : " << R_BA.at(0) << endl << " t1 : " << t_BA.at(0) << endl;
-//        cout << " R2 : " << R_BA.at(1) << endl << " t2 : " << t_BA.at(1)<< endl;
-//        cout << " R3 : " << R_BA.at(2) << endl <<  " t3 : " << t_BA.at(2)<< endl;
-//        cout << " R4 : " << R_BA.at(3) << endl <<  " t4 : " << t_BA.at(3)<< endl;
-//        cout << " R5 : " << R_BA.at(4) << endl <<  " t5 : " << t_BA.at(4) << endl;
+//        cout << "R1 : " << 180/3.14*R_BA.at(0) << endl << " t1 : " << t_BA.at(0) << endl;
+//        cout << " R2 : " << 180/3.14*R_BA.at(1) << endl << " t2 : " << t_BA.at(1)<< endl;
+//        cout << " R3 : " << 180/3.14*R_BA.at(2) << endl <<  " t3 : " << t_BA.at(2)<< endl;
+//        cout << " R4 : " << 180/3.14*R_BA.at(3) << endl <<  " t4 : " << t_BA.at(3)<< endl;
+//        cout << " R5 : " << 180/3.14*R_BA.at(4) << endl <<  " t5 : " << t_BA.at(4) << endl;
 
         /*tampilkan variabel untuk diamati*/
         Mat R_vec;
         Rodrigues(R_w, R_vec);
         cout << "Frame " << frame << endl;
+//        cout << R_BA.at(0) << endl << t_BA.at(0) << endl << R_c << endl
         cout << "Key1:" << prev_keypoint.size() << " Key2:" << curr_keypoint.size();
         cout << " Match1:" << good_matches.size();
         cout << " Inlier:" << countNonZero(inlier) << "  " << "time: " << (clock() - time_per_frame)/CLOCK_PER_SEC;
         cout << " X:" << t_w.at<double>(0,0) << " Y:" << t_w.at<double>(1,0) << " Z:" << t_w.at<double>(2,0) << endl;
         cout << " Yaw:" << 180/3.14*R_vec.at<double>(0,0) << " Pitch:" << 180/3.14*R_vec.at<double>(1,0) << " Roll:" << 180/3.14*R_vec.at<double>(2,0) << endl;
+        cout << " Yaw:" << 180/3.14*R_BA.at(4).at<double>(0,0) << " Pitch:" << 180/3.14*R_BA.at(4).at<double>(1,0) << " Roll:" << 180/3.14*R_BA.at(4).at<double>(2,0) << endl;
         cout << " ----------------------------------------------------------------------------" << endl;
 
         namedWindow( "Trajectory", WINDOW_AUTOSIZE );// Create a window for display.
@@ -706,6 +768,32 @@ int main()
         prev_descriptor = curr_descriptor.clone();
 
         waitKey(1);
+        last_frame = frame;
     }
+    char filename[128];
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-4);
+    Mat im1 = imread(filename,IMREAD_COLOR);
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-3);
+    Mat im2 = imread(filename,IMREAD_COLOR);
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-2);
+    Mat im3 = imread(filename,IMREAD_COLOR);
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame-1);
+    Mat im4 = imread(filename,IMREAD_COLOR);
+    sprintf(filename, "/media/dikysepta/DATA/Final Project/Datasets/dataset/sequences/00/image_0/%06d.png", last_frame);
+    Mat im5 = imread(filename,IMREAD_COLOR);
+
+    circle(im1, Point(point_correspondence.at(0).at(6).x, point_correspondence.at(0).at(6).y) ,1, CV_RGB(255,0,0), 2);
+    circle(im2, Point(point_correspondence.at(1).at(6).x, point_correspondence.at(1).at(6).y) ,1, CV_RGB(255,0,0), 2);
+    circle(im3, Point(point_correspondence.at(2).at(6).x, point_correspondence.at(2).at(6).y) ,1, CV_RGB(255,0,0), 2);
+    circle(im4, Point(point_correspondence.at(3).at(6).x, point_correspondence.at(3).at(6).y) ,1, CV_RGB(255,0,0), 2);
+    circle(im5, Point(point_correspondence.at(4).at(6).x, point_correspondence.at(4).at(6).y) ,1, CV_RGB(255,0,0), 2);
+
+    imshow("frame 1", im1);
+    imshow("frame 2", im2);
+    imshow("frame 3", im3);
+    imshow("frame 4", im4);
+    imshow("frame 5", im5);
+    waitKey(0);
+
     return 0;
 }
